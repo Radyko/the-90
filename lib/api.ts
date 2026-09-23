@@ -8,6 +8,7 @@ import type {
   Clan,
   ClanEvent,
   ClanPreview,
+  ClanTheme,
   LeaderboardRow,
   Member,
   Membership,
@@ -24,7 +25,8 @@ export type GameErrorCode =
   | "not_authenticated" | "no_profile" | "bad_persona" | "gear_locked"
   | "timezone_change_too_soon" | "bad_tasks" | "too_many_clans" | "invalid_invite"
   | "clan_full" | "not_leader" | "not_a_member" | "use_leave_clan" | "unknown_task"
-  | "already_finished" | "cannot_stoke_self" | "already_done_today" | "already_stoked";
+  | "already_finished" | "cannot_stoke_self" | "already_done_today" | "already_stoked"
+  | "limit_below_members";
 
 const MESSAGES: Record<GameErrorCode, string> = {
   not_authenticated: "Please sign in again.",
@@ -44,6 +46,7 @@ const MESSAGES: Record<GameErrorCode, string> = {
   cannot_stoke_self: "You can't stoke your own flame.",
   already_done_today: "They've already finished today.",
   already_stoked: "You already stoked them today.",
+  limit_below_members: "The limit can’t be lower than the current member count.",
 };
 
 export class GameError extends Error {
@@ -133,7 +136,7 @@ export async function myMemberships(userId: string): Promise<Membership[]> {
 }
 
 export const createClan = (args: {
-  name: string; challengeName: string; lengthDays: number; tasks: Task[]; isPublic?: boolean;
+  name: string; challengeName: string; lengthDays: number; tasks: Task[]; isPublic?: boolean; theme?: ClanTheme;
 }) =>
   rpc<Clan>("create_clan", {
     p_name: args.name,
@@ -141,6 +144,7 @@ export const createClan = (args: {
     p_length_days: args.lengthDays,
     p_tasks: args.tasks,
     p_is_public: args.isPublic ?? true,
+    p_theme: args.theme ?? "sunset",
   });
 
 export const previewClan = async (code: string) =>
@@ -166,8 +170,17 @@ export const leaderboard = (limit = 50) => rpc<LeaderboardRow[]>("clan_leaderboa
 export const respondRequest = (clanId: string, userId: string, accept: boolean) =>
   rpc<void>("respond_request", { p_clan: clanId, p_user: userId, p_accept: accept });
 
-export const updateClan = (clanId: string, patch: { name?: string; isPublic?: boolean }) =>
-  rpc<Clan>("update_clan", { p_clan: clanId, p_name: patch.name ?? null, p_is_public: patch.isPublic ?? null });
+export const updateClan = (
+  clanId: string,
+  patch: { name?: string; isPublic?: boolean; theme?: ClanTheme; maxMembers?: number },
+) =>
+  rpc<Clan>("update_clan", {
+    p_clan: clanId,
+    p_name: patch.name ?? null,
+    p_is_public: patch.isPublic ?? null,
+    p_theme: patch.theme ?? null,
+    p_max_members: patch.maxMembers ?? null,
+  });
 
 export const rotateInvite = (clanId: string) => rpc<string>("rotate_invite", { p_clan: clanId });
 
@@ -178,7 +191,12 @@ export const transferLeadership = (clanId: string, userId: string) =>
   rpc<void>("transfer_leadership", { p_clan: clanId, p_user: userId });
 
 export function inviteUrl(code: string, origin = window.location.origin): string {
-  return `${origin}/?join=${code}`;
+  return `${origin}/j/${code}`;
+}
+
+/** Accepts a full invite URL or a bare 16-character code. */
+export function parseInvite(input: string): string | null {
+  return input.match(/[a-f0-9]{16}/i)?.[0].toLowerCase() ?? null;
 }
 
 // ─── Realtime ───────────────────────────────────────────────────────────────

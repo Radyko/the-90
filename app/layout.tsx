@@ -1,24 +1,17 @@
 import type { Metadata, Viewport } from "next";
-import { Bricolage_Grotesque, Instrument_Sans } from "next/font/google";
+import { Fredoka, Nunito } from "next/font/google";
+import { AppProvider } from "@/components/AppProvider";
 import "./globals.css";
 
-const display = Bricolage_Grotesque({
-  subsets: ["latin"],
-  weight: ["700", "800"],
-  variable: "--font-display",
-  display: "swap",
-});
-
-const body = Instrument_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  variable: "--font-body",
-  display: "swap",
-});
+const fredoka = Fredoka({ subsets: ["latin"], weight: ["600", "700"], variable: "--font-fredoka", display: "swap" });
+const nunito = Nunito({ subsets: ["latin"], weight: ["600", "700", "800"], variable: "--font-nunito", display: "swap" });
 
 export const metadata: Metadata = {
   title: "The 90",
-  description: "Two lanes, four daily non-negotiables, ninety days. Miss one and you're back to Day 1.",
+  description: "Hard days, together. Keep your flame alive with your crew.",
+  manifest: "/manifest.webmanifest",
+  icons: { icon: "/icons/favicon.svg", apple: "/icons/apple-touch-icon.png" },
+  appleWebApp: { capable: true, title: "The 90", statusBarStyle: "default" },
 };
 
 export const viewport: Viewport = {
@@ -26,15 +19,18 @@ export const viewport: Viewport = {
   initialScale: 1,
   viewportFit: "cover",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#EDEDE8" },
-    { media: "(prefers-color-scheme: dark)", color: "#141512" },
+    { media: "(prefers-color-scheme: light)", color: "#FFF1EA" },
+    { media: "(prefers-color-scheme: dark)", color: "#10262D" },
   ],
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // data-theme follows the active clan (set by AppProvider); dark mode follows the OS.
   return (
-    <html lang="en" className={`${display.variable} ${body.variable}`}>
-      <body>{children}</body>
+    <html lang="en" data-theme="sunset" className={`${fredoka.variable} ${nunito.variable}`} suppressHydrationWarning>
+      <body>
+        <AppProvider>{children}</AppProvider>
+      </body>
     </html>
   );
 }

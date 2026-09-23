@@ -3,6 +3,8 @@
 export type Eyes = "round" | "sharp" | "sleepy" | "happy";
 export type Gear = "none" | "headband" | "horns" | "crown";
 export type Stage = "spark" | "flame" | "blaze" | "inferno" | "phoenix";
+export type ClanTheme = "sunset" | "campfire" | "forest" | "lake" | "berry" | "sand";
+export const CLAN_THEMES: ClanTheme[] = ["sunset", "campfire", "forest", "lake", "berry", "sand"];
 
 export type Persona = {
   hue?: number; // 0–359
@@ -31,6 +33,7 @@ export type Clan = {
   invite_code: string;
   is_public: boolean;
   max_members: number;
+  theme: ClanTheme;
   created_by: string | null;
   created_at: string;
 };
@@ -63,7 +66,7 @@ export type ClanEvent = {
   | { kind: "joined"; day: 1; meta: Record<string, never> }
   | { kind: "left"; day: null; meta: { removed?: boolean } }
   | { kind: "day_complete" | "milestone"; day: number; meta: { attempt: number } }
-  | { kind: "died"; day: number; meta: { attempt: number } } // day = days survived
+  | { kind: "died"; day: number; meta: { attempt: number; reason: "midnight" | "rule"; missed: number } } // day = days survived
   | { kind: "finished"; day: number; meta: { attempt: number } }
   | { kind: "stoke"; day: null; meta: { target: string } }
 );
@@ -114,6 +117,8 @@ export type ClanPreview = {
   challenge_name: string;
   length_days: number;
   tasks: Task[];
+  theme: ClanTheme;
   members: number;
+  max_members: number;
   my_status: "pending" | "active" | null;
 };

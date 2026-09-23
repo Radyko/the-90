@@ -56,6 +56,7 @@ grant execute on function t.id(text) to authenticated;
 set role anon;
 select t.fails('select * from public.clans', 'permission denied', 'anon cannot read clans');
 select t.fails('select public.sync_me()', 'permission denied', 'anon cannot call RPCs');
+select t.ok((select count(*) from public.preview_clan('0000000000000000')) = 0, 'anon can call preview (bad code → nothing)');
 reset role;
 
 -- ─── Profiles ───────────────────────────────────────────────────────────────
@@ -88,6 +89,13 @@ select t.fails($$select public.create_clan('Owls', 'The 90', 90, '[{"key":"Bad K
                'bad_tasks', 'invalid task key rejected');
 select id as clan, invite_code as code from public.create_clan('Night Owls', 'The 90', 90, :tasks) \gset
 select t.ok((select role from public.clan_members where user_id = t.id('raddy')) = 'leader', 'creator is leader');
+select t.ok((select theme from public.clans where id = :'clan') = 'sunset', 'default theme is sunset');
+
+set role anon;
+select set_config('request.jwt.claim.sub', '', false);  -- signed out
+select t.ok((select name = 'Night Owls' and members = 1 and theme = 'sunset' and my_status is null
+             from public.preview_clan(:'code')), 'signed-out invite preview works');
+set role authenticated;
 
 select t.act_as(t.id('oscar'));
 select t.ok((select members from public.preview_clan(:'code')) = 1, 'invite preview shows member count');
@@ -127,7 +135,7 @@ select t.fails('update public.clan_members set deaths = 0', 'permission denied',
 select t.fails($$insert into public.clan_events (clan_id, kind) values (gen_random_uuid(), 'joined')$$,
                'permission denied', 'no direct event inserts');
 select t.fails($$update public.clans set length_days = 7$$, 'permission denied', 'no direct clan updates');
-select t.fails(format('select private.kill_member(%L, %L, 0, current_date)', :'clan', t.id('raddy')),
+select t.fails(format('select private.kill_member(%L, %L, 0, current_date, ''rule'', 0)', :'clan', t.id('raddy')),
                'permission denied', 'private.kill_member not callable');
 select t.fails('select private.evaluate_all()', 'permission denied', 'private.evaluate_all not callable');
 select t.fails(format('select private.evaluate_member(%L, %L)', :'clan', t.id('raddy')),
@@ -170,8 +178,9 @@ select private.evaluate_all();  -- idempotent
 select t.ok((select deaths = 1 and attempt = 2 and best_run = 2
                     and start_date = private.user_today(t.id('dana'))
              from public.clan_members where user_id = t.id('dana')), 'dana died once, best run 2, restarted today');
-select t.ok((select day = 2 and meta ->> 'attempt' = '1' from public.clan_events where kind = 'died'),
-            'died event: survived 2 days, attempt 1');
+select t.ok((select day = 2 and meta = '{"attempt": 1, "reason": "midnight", "missed": 1}'
+             from public.clan_events where kind = 'died'),
+            'died event: survived 2 days, attempt 1, midnight, 1 task missed');
 
 -- Backfilling is impossible: check_task only ever writes today.
 set role authenticated;
@@ -186,6 +195,11 @@ set role authenticated;
 select t.act_as(t.id('dana'));
 select public.self_report_fail(:'clan');
 select t.ok((select deaths from public.clan_members where user_id = t.id('dana')) = 2, 'self-report kills the flame');
+reset role;
+select t.ok((select meta ->> 'reason' = 'rule' from public.clan_events
+             where kind = 'died' order by id desc limit 1), 'self-report death is marked as a broken rule');
+set role authenticated;
+select t.act_as(t.id('dana'));
 
 -- ─── Time-zone hop can't buy a day ──────────────────────────────────────────
 \warn '── timezone'
@@ -204,6 +218,11 @@ select t.fails($$update public.profiles set timezone = 'UTC'$$, 'timezone_change
 -- ─── Leader tools ───────────────────────────────────────────────────────────
 \warn '── leader tools'
 select t.ok((select name from public.update_clan(:'clan', 'Night Owls FC', null)) = 'Night Owls FC', 'leader renames clan');
+select t.ok((select theme from public.update_clan(:'clan', p_theme => 'forest')) = 'forest', 'leader sets clan theme');
+select t.fails(format('select public.update_clan(%L, p_theme => %L)', :'clan', 'neon'), 'check', 'unknown theme rejected');
+select t.ok((select max_members from public.update_clan(:'clan', p_max_members => 3)) = 3, 'leader sets member limit');
+select t.fails(format('select public.update_clan(%L, p_max_members => 2)', :'clan'), 'limit_below_members',
+               'limit cannot drop below current members');
 select t.ok(public.rotate_invite(:'clan') <> :'code', 'invite rotated');
 select t.act_as(t.id('stranger'));
 select t.fails(format('select public.request_join(%L)', :'code'), 'invalid_invite', 'old invite link is dead');

@@ -52,6 +52,8 @@ create table if not exists public.clans (
   invite_code    text        not null unique default private.new_invite_code(),
   is_public      boolean     not null default true,   -- listed on the global leaderboard
   max_members    integer     not null default 100 check (max_members between 2 and 500),
+  theme          text        not null default 'sunset'
+                             check (theme in ('sunset', 'campfire', 'forest', 'lake', 'berry', 'sand')),
   created_by     uuid        references auth.users(id) on delete set null,
   created_at     timestamptz not null default now()
 );
@@ -76,6 +78,10 @@ create table if not exists public.clan_members (
   primary key (clan_id, user_id)
 );
 
+-- Columns added after the first release (no-ops on a fresh install).
+alter table public.clans add column if not exists theme text not null default 'sunset'
+  check (theme in ('sunset', 'campfire', 'forest', 'lake', 'berry', 'sand'));
+
 create index if not exists clan_members_user_idx on public.clan_members (user_id);
 
 create table if not exists public.clan_events (
@@ -94,7 +100,7 @@ alter table public.clan_events add constraint clan_events_kind_check check (kind
   'left',          -- meta.removed = true when a leader removed them
   'day_complete',  -- day = day number completed
   'milestone',     -- day = milestone day completed
-  'died',          -- day = days survived, meta.attempt = attempt that ended
+  'died',          -- day = days survived; meta: attempt that ended, reason 'midnight'|'rule', missed tasks
   'finished',      -- day = challenge length
   'stoke'          -- meta.target = user nudged
 ));
@@ -350,7 +356,9 @@ returns void language sql security definer set search_path = '' as $$
 $$;
 
 -- The flame dies: record it and restart the run at Day 1 on p_today.
-create or replace function private.kill_member(p_clan uuid, p_user uuid, p_survived integer, p_today date)
+drop function if exists private.kill_member(uuid, uuid, integer, date);
+create or replace function private.kill_member(
+  p_clan uuid, p_user uuid, p_survived integer, p_today date, p_reason text, p_missed integer)
 returns void language plpgsql security definer set search_path = '' as $$
 declare
   v_ended integer;
@@ -369,7 +377,7 @@ begin
    returning attempt - 1 into v_ended;
 
   perform private.log_event(p_clan, p_user, 'died', p_survived,
-                            jsonb_build_object('attempt', v_ended));
+                            jsonb_build_object('attempt', v_ended, 'reason', p_reason, 'missed', p_missed));
 end;
 $$;
 
@@ -392,7 +400,8 @@ begin
   v_day := greatest(m.start_date, coalesce(m.last_evaluated + 1, m.start_date));
   while v_day < v_today loop
     if not private.day_complete(m.log, v_day, v_tasks) then
-      perform private.kill_member(p_clan, p_user, v_day - m.start_date, v_today);
+      perform private.kill_member(p_clan, p_user, v_day - m.start_date, v_today, 'midnight',
+        jsonb_array_length(v_tasks) - private.tasks_done(m.log, v_day, v_tasks));
       return;
     end if;
     v_day := v_day + 1;
@@ -527,7 +536,7 @@ begin
    where clan_id = p_clan and user_id = v_uid and status = 'active' for update;
   if not found then raise exception 'not_a_member'; end if;
   if m.finished_at is not null then raise exception 'already_finished'; end if;
-  perform private.kill_member(p_clan, v_uid, v_today - m.start_date, v_today);
+  perform private.kill_member(p_clan, v_uid, v_today - m.start_date, v_today, 'rule', 0);
 end;
 $$;
 
@@ -564,9 +573,10 @@ $$;
 
 -- ═══ RPCs: clans ═══════════════════════════════════════════════════════════
 
+drop function if exists public.create_clan(text, text, integer, jsonb, boolean);
 create or replace function public.create_clan(
   p_name text, p_challenge_name text, p_length_days integer, p_tasks jsonb,
-  p_is_public boolean default true)
+  p_is_public boolean default true, p_theme text default 'sunset')
 returns public.clans language plpgsql security definer set search_path = '' as $$
 declare
   v_uid  uuid := private.require_user();
@@ -575,9 +585,9 @@ begin
   perform private.require_clan_slot(v_uid);
   perform private.validate_tasks(p_tasks);
 
-  insert into public.clans (name, challenge_name, length_days, tasks, is_public, created_by)
+  insert into public.clans (name, challenge_name, length_days, tasks, is_public, theme, created_by)
   values (trim(p_name), trim(p_challenge_name), p_length_days, p_tasks,
-          coalesce(p_is_public, true), v_uid)
+          coalesce(p_is_public, true), coalesce(p_theme, 'sunset'), v_uid)
   returning * into v_clan;
 
   insert into public.clan_members (clan_id, user_id, role, status, start_date, joined_at)
@@ -588,16 +598,19 @@ begin
 end;
 $$;
 
--- What an invite link shows before joining. No member identities.
+-- What an invite link shows, signed in or not: the invite code is the secret.
+-- No member identities.
+drop function if exists public.preview_clan(text);
 create or replace function public.preview_clan(p_code text)
-returns table (id uuid, name text, challenge_name text, length_days integer,
-               tasks jsonb, members bigint, my_status text)
+returns table (id uuid, name text, challenge_name text, length_days integer, tasks jsonb,
+               theme text, members bigint, max_members integer, my_status text)
 language sql stable security definer set search_path = '' as $$
-  select c.id, c.name, c.challenge_name, c.length_days, c.tasks,
+  select c.id, c.name, c.challenge_name, c.length_days, c.tasks, c.theme,
          (select count(*) from public.clan_members m where m.clan_id = c.id and m.status = 'active'),
+         c.max_members,
          (select m.status from public.clan_members m where m.clan_id = c.id and m.user_id = auth.uid())
     from public.clans c
-   where c.invite_code = p_code and auth.uid() is not null;
+   where c.invite_code = p_code;
 $$;
 
 create or replace function public.request_join(p_code text)
@@ -652,15 +665,23 @@ $$;
 -- ═══ RPCs: leader tools ════════════════════════════════════════════════════
 -- The challenge itself (tasks, length) is fixed once a clan exists — fair for everyone.
 
-create or replace function public.update_clan(p_clan uuid, p_name text, p_is_public boolean)
+drop function if exists public.update_clan(uuid, text, boolean);
+create or replace function public.update_clan(
+  p_clan uuid, p_name text default null, p_is_public boolean default null,
+  p_theme text default null, p_max_members integer default null)
 returns public.clans language plpgsql security definer set search_path = '' as $$
 declare
   v_clan public.clans;
 begin
   perform private.require_leader(p_clan);
+  if p_max_members < (select count(*) from public.clan_members where clan_id = p_clan) then
+    raise exception 'limit_below_members';
+  end if;
   update public.clans
-     set name = coalesce(nullif(trim(p_name), ''), name),
-         is_public = coalesce(p_is_public, is_public)
+     set name        = coalesce(nullif(trim(p_name), ''), name),
+         is_public   = coalesce(p_is_public, is_public),
+         theme       = coalesce(p_theme, theme),
+         max_members = coalesce(p_max_members, max_members)
    where id = p_clan
    returning * into v_clan;
   return v_clan;
@@ -813,12 +834,12 @@ grant execute on function
   public.check_task(uuid, text, boolean),
   public.self_report_fail(uuid),
   public.stoke(uuid, uuid),
-  public.create_clan(text, text, integer, jsonb, boolean),
+  public.create_clan(text, text, integer, jsonb, boolean, text),
   public.preview_clan(text),
   public.request_join(text),
   public.respond_request(uuid, uuid, boolean),
   public.leave_clan(uuid),
-  public.update_clan(uuid, text, boolean),
+  public.update_clan(uuid, text, boolean, text, integer),
   public.rotate_invite(uuid),
   public.remove_member(uuid, uuid),
   public.transfer_leadership(uuid, uuid),
@@ -827,6 +848,9 @@ grant execute on function
   public.clan_leaderboard(integer),
   public.delete_account()
 to authenticated;
+
+-- Invite links preview before sign-in.
+grant execute on function public.preview_clan(text) to anon;
 
 -- RLS policies evaluate these as the querying user.
 grant execute on function
