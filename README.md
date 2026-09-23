@@ -1,14 +1,14 @@
 # The 90
 
-A 90-day accountability board for two. Each person keeps a lane with four daily
-non-negotiables. Miss even one in a day and you restart at Day 1 (an honest, self-called
-restart). Both lanes sit side by side and update live. You can only check your own boxes.
-
-Built to be **multi-tenant from day one**: anyone can sign up, start a board, and invite one
-friend by link. Each board is private to its members, enforced by Postgres Row-Level Security.
+Keep your flame alive. Clans take on a challenge together (75 Hard, 75 Soft, The 90, or
+their own). Every member keeps a flame alive by completing every task, every day. Miss a
+day and the flame dies: back to Day 1, and the whole clan sees it.
 
 **Stack:** Next.js 16 (App Router, TypeScript) · React 19 · Supabase (Postgres, Auth magic
-link, Realtime) · hand-written CSS · deployed on Vercel.
+link, Realtime, pg_cron) · hand-written CSS · Vercel.
+
+**Status:** the backend (game engine, security, API client) is complete and tested. The UI
+is being designed from [docs/claude-design-brief.md](docs/claude-design-brief.md).
 
 ---
 
@@ -25,7 +25,11 @@ Other scripts: `npm run typecheck`, `npm run build`, `npm start`.
 ## Supabase setup
 
 1. **Create a project** at <https://supabase.com/dashboard>.
-2. **Run the schema:** open *SQL Editor → New query*, paste all of `supabase/schema.sql`, run it.
+2. **Run the SQL** in *SQL Editor → New query*, one file at a time, in this order:
+   1. `supabase/drop_v1.sql`: only if you ran the old two-person schema. Removes it.
+   2. `supabase/schema.sql`: tables, security, game engine. Safe to re-run after changes.
+   3. `supabase/cron.sql`: hourly death checks. If it errors, first enable **pg_cron** under
+      *Database → Extensions*, then run it again.
 3. **Keys:** *Project Settings → API*: copy the **Project URL** and the **anon / publishable**
    key into `.env.local`. Never use the `service_role` / secret key in this app.
 4. **Auth URLs:** *Authentication → URL Configuration*:
@@ -38,10 +42,8 @@ Other scripts: `npm run typecheck`, `npm run build`, `npm start`.
 5. **Email delivery (required before real users arrive):** Supabase's built-in mailer is for
    testing only and is heavily rate-limited (a handful of emails per hour). Under
    *Authentication → Emails → SMTP Settings*, plug in a provider such as Resend, Postmark, or SES.
-6. **Sign-ups:** leave public sign-ups **on**. Privacy comes from RLS: strangers can create
-   their own boards but can never see yours. For a private two-person deployment instead,
-   turn sign-ups off under *Authentication → Sign In / Providers* and invite both emails from
-   *Authentication → Users → Invite*.
+6. **Sign-ups:** leave public sign-ups **on**. Privacy comes from RLS: anyone can sign up
+   and create clans, but nobody can see a clan they haven't been let into.
 
 ## Deploy to Vercel
 
@@ -54,37 +56,37 @@ Other scripts: `npm run typecheck`, `npm run build`, `npm start`.
 
 ## How it works
 
-- **Boards:** a board holds up to 2 participants (`boards.max_members`, which the DB caps at 12).
-  "Start Day 1" calls `create_board()`. The invite link `/?join=<code>` calls `join_board()`.
-- **Days** are the owner's *local* calendar day. Each participant row stores an IANA
-  `timezone`, so a friend in Tokyo sees your lane on your calendar, not theirs.
-- **Realtime:** the client subscribes to `postgres_changes` on `participants` filtered to the
-  board and refetches on any change.
+- **Rules live in the database.** Clients can only read (RLS) and call RPCs; every RPC
+  validates. For example, tasks can only be checked for your own *today*, so nobody can
+  backfill a missed day.
+- **Deaths are automatic.** `private.evaluate_member()` judges each ended local day. It
+  runs hourly (pg_cron) and whenever the app opens (`sync_me()`).
+- **Time zones:** each member plays on their own local calendar. Zone changes are limited
+  to one every 12h, and the old zone's ended days are judged first.
+- **Internals are private.** The engine lives in a `private` schema that the API doesn't
+  expose. Only an explicit list of `public` RPCs is callable.
+- **Frontend contract:** `lib/api.ts` (typed calls, realtime, error messages) and
+  `lib/types.ts`. Game rules are listed in `CLAUDE.md`.
 
-## Security model
+### Tests
 
-All of it lives in `supabase/schema.sql`:
+```bash
+npm run test:db
+```
 
-| What | Rule |
-|---|---|
-| Read boards / participants | only boards you're a member of |
-| Update participants | only your own row, and only `display_name, start_date, attempt, log, timezone` (column grants) |
-| Insert participants / boards | never directly; only through `create_board()` / `join_board()` (security definer, invite code required, member cap enforced under a row lock) |
-| Delete | not allowed from the client |
-| Abuse guards | ≤ 5 boards per user, `log` capped at 64 KB, text length checks |
-
-The anon key is public by design. The client writes only to its own row, one write at a time.
+This spins up a throwaway local Postgres (you need `initdb`, `pg_ctl` and `psql` on PATH),
+loads the schema twice, and runs `supabase/tests/game_test.sql`: 60+ checks covering
+permissions, joining, deaths, time-zone abuse, leader tools, finishing, gear, the
+leaderboard and account deletion.
 
 ## Roadmap to a public launch
 
+- **UI** from the Claude Design handoff, built on `lib/api.ts`.
 - **Custom SMTP** (above) and **CAPTCHA** on sign-in (Supabase supports Turnstile/hCaptcha).
-- **Account deletion (GDPR):** needs a server-side function (a Supabase Edge Function using
-  the service role) that deletes the auth user; `on delete cascade` removes their rows.
-  Add a privacy policy and terms.
-- **Leave board / board names / more than two lanes:** the schema already supports these; the UI does not yet.
-- **i18n:** UI strings live in `app/page.tsx` and `lib/supabase.ts` (`TASKS`); extract them to a message catalog.
-- **Custom tasks per board:** the four keys are fixed today. Making them configurable needs a migration.
-- **Server-side auth:** move to `@supabase/ssr` (cookies, middleware, server components) if
-  you need SSR of signed-in pages or server-side route protection. It isn't needed now:
-  every read is protected by RLS.
-- **Reminders:** PWA + web push, or a daily email.
+- **Push reminders** (PWA + web push): "your flame has 3 hours left". Stokes are already
+  logged as events, ready to trigger a push.
+- **Photo proof + vouching:** needs Supabase Storage and a vouch table.
+- **Legal:** privacy policy and terms. Account deletion already exists (`delete_account`).
+  Check the "75 Hard" trademark before using the name publicly.
+- **i18n**, and **scale**: `evaluate_all` walks every active member hourly. Fine for tens of
+  thousands of members; batch it by time zone later.
